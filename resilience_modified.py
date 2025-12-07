@@ -1,10 +1,12 @@
 """
 Modified microgrid resilience simulation incorporating
-pre‑disaster operation, storm‑time behaviour, critical load
-considerations and enhanced hazard failure models.
+pre‑disaster operation, 
+storm‑time behaviour, 
+critical load considerations and 
+enhanced hazard failure models.
 
 This script adapts the original simulation to:
-  * Maintain battery state of charge (SOC) between 50% and 80% by
+  * Maintain battery state of charge (SOC) between 30% and 80% by
     adjusting the design parameters. Batteries are initialised at
     80% SOC so they are ready for use when the storm begins.
   * Represent critical load as 20% of the total demand. Service
@@ -135,7 +137,11 @@ class SimulationResult:
     P_pv: List[float]
     P_dg: List[float]
 
-
+        # 每一台設備的可用狀態時間序列 (0=故障, 1=正常)
+    U_WT_series: List[List[int]]
+    U_PV_series: List[List[int]]
+    U_DG_series: List[List[int]]
+    U_BAT_series: List[List[int]]
 # =========================================================
 # 3. Part 2: 核心韌性模擬 simulate_microgrid_resilience
 # =========================================================
@@ -183,7 +189,13 @@ def simulate_microgrid_resilience(
     U_PV = [1] * n_PV
     U_DG = [1] * n_DG
     U_BAT = [1] * n_BAT
-
+    
+    #逐時記錄每台設備的可用狀態
+    U_WT_series = [[1] * T_len for _ in range(n_WT)]
+    U_PV_series = [[1] * T_len for _ in range(n_PV)]
+    U_DG_series = [[1] * T_len for _ in range(n_DG)]
+    U_BAT_series = [[1] * T_len for _ in range(n_BAT)]
+    
     repair_WT = [None] * n_WT
     repair_PV = [None] * n_PV
     repair_DG = [None] * n_DG
@@ -204,7 +216,7 @@ def simulate_microgrid_resilience(
     Tt = [0.0] * T_len
     service_level = [1.0] * T_len
 
-    # Effective demand array (scaled during storm)
+    # Effective demand array (scaled during storm) CRITICAL LOAD
     D_effective = [0.0] * T_len
 
     # Track hourly generation from wind turbines, PV and diesel generators
@@ -226,7 +238,8 @@ def simulate_microgrid_resilience(
         h_wind = scenario.hazard.wind_speed[t]
         h_rain = scenario.hazard.rainfall[t]
         # Hazard factor used for derating battery output based on wind and rain
-        hazard_factor = min(1.0, (h_wind / 30.0) + (h_rain / 80.0))
+        #cut-off wind speed at 25 m/s and extreme rain at 80 mm/hr
+        hazard_factor = min(1.0, (h_wind / 25.0) + (h_rain / 80.0))
         temp_derate[t] = 1.0 - 0.2 * hazard_factor  # at most derate by 20%
 
     # PV/WT post-storm derate: linear recovery over 24h after storm ends
@@ -248,12 +261,7 @@ def simulate_microgrid_resilience(
         # demand) must be served. This reflects load shedding down to
         # essential services.
         Dt_full = D_full[t]
-        if td <= t <= tfr:
-            Dt = Dt_full * critical_load_ratio
-        else:
-            Dt = Dt_full
-
-        # record the effective demand for output and visualisation
+        Dt = Dt_full* critical_load_ratio 
         D_effective[t] = Dt
 
         # 1) Update failure/repair states based on hazard during the storm
@@ -261,7 +269,7 @@ def simulate_microgrid_resilience(
             h_wind = scenario.hazard.wind_speed[t]
             h_rain = scenario.hazard.rainfall[t]
             # Adjusted hazard factor emphasising high wind/rain using squared terms
-            hazard_factor = min(1.0, (h_wind / 30.0) ** 2 + (h_rain / 80.0) ** 2)
+            hazard_factor = min(1.0, (h_wind / 25.0) ** 2 + (h_rain / 80.0) ** 2)
         else:
             hazard_factor = 0.0
 
@@ -308,6 +316,16 @@ def simulate_microgrid_resilience(
             else:
                 if repair_BAT[i] is not None and t >= repair_BAT[i]:
                     U_BAT[i] = 1
+
+        # Log availability
+        for i in range(n_WT):
+            U_WT_series[i][t] = U_WT[i]
+        for i in range(n_PV):
+            U_PV_series[i][t] = U_PV[i]
+        for i in range(n_DG):
+            U_DG_series[i][t] = U_DG[i]
+        for i in range(n_BAT):
+            U_BAT_series[i][t] = U_BAT[i]
 
         # 2) Propagate SOC from previous hour
         if t > 0:
@@ -519,6 +537,7 @@ def simulate_microgrid_resilience(
         num += (1.0 - service_level[t])
         den += 1.0
     resilience_curve = 1.0 - num / den if den > 0 else 0.0
+    #resilience = 1 − average_unserved_load
 
     # 從災害發生到系統恢復到穩定 0.99 水準的時間
     recovery_time_h = None
@@ -546,6 +565,10 @@ def simulate_microgrid_resilience(
         P_wt=P_wt_all,
         P_pv=P_pv_all,
         P_dg=P_dg_all,
+        U_WT_series=U_WT_series,
+        U_PV_series=U_PV_series,
+        U_DG_series=U_DG_series,
+        U_BAT_series=U_BAT_series,
     )
 
 
@@ -583,7 +606,7 @@ def _pad_to_horizon(lst: List[float], p: int) -> List[float]:
         return lst[:p]
     if not lst:
         return [0.0] * p
-    return lst + [lst[-1]] * (p - len(lst))
+    return lst + [lst[-1]] * (p - len(lst)) #steady-state extrapolation
 
 
 def compute_LCOE(
@@ -822,8 +845,7 @@ if __name__ == "__main__":
         name="Morakot_like",
         disturbance_start=disturbance_start,
         disturbance_end=disturbance_end,
-        base_p_damage_WT=0.10,  # midpoint of 0.05–0.15
-        base_p_damage_PV=0.065,  # midpoint of 0.03–0.10
+        base_p_damage_WT=0.10,  # 平時故障率
         base_p_damage_DG=0.01,
         base_p_damage_BAT=0.01,
         MTTR_WT=72.0,
@@ -838,7 +860,7 @@ if __name__ == "__main__":
     # Increase DG capacity: original had 3x5 MW; add three more 5 MW units
     P_DG_units = [5000.0] * 6  # 6 units of 5 MW each = 30 MW total
 
-    # Battery design: maintain 50–80% SOC (B_min_soc_frac=0.5, B_max_soc_frac=0.8)
+    # Battery design: maintain 30–80% SOC (B_min_soc_frac=0.2, B_max_soc_frac=0.8)
     B_max_list = [4000.0] * 10
     B_init_list = [b * 0.8 for b in B_max_list]  # initialise at 80% of B_max
 
@@ -861,11 +883,11 @@ if __name__ == "__main__":
         A_WT=0.98,
         fuel_rate_max=fuel_rate_max,
         fuel_storage=fuel_storage_required,
-        DG_min_loading=0.3,
+        DG_min_loading=0.2,
         DG_max_loading=0.8,
-        B_min_soc_frac=0.5,
+        B_min_soc_frac=0.2,
         B_max_soc_frac=0.8,
-        C_rate_charge=0.5,
+        C_rate_charge=1.0,
         C_rate_discharge=1.0,
     )
 
@@ -963,6 +985,7 @@ if __name__ == "__main__":
     plt.title("Hourly Demand, Served Load, and Unserved Load")
     plt.legend()
     plt.tight_layout()
+    plt.savefig("charts/Hourly Demand, Served Load, and Unserved Load.png", dpi=200)
     plt.show()
 
     # Plot 2: Battery SOC average
@@ -974,6 +997,7 @@ if __name__ == "__main__":
     plt.ylabel("Battery SOC (average across batteries) [kWh]")
     plt.title("Hourly Battery SOC (Average)")
     plt.tight_layout()
+    plt.savefig("charts/Hourly Battery SOC (Average).png", dpi=200)
     plt.show()
 
     # Plot 3: Resilience curve (service level over time)
@@ -988,6 +1012,7 @@ if __name__ == "__main__":
     plt.title("Resilience Curve (Service Level Over Time)")
     plt.legend()
     plt.tight_layout()
+    plt.savefig("charts/Resilience Curve (Service Level Over Time).png", dpi=200)
     plt.show()
 
     # ---------- 圖 4：各機組逐時發電量與電池充放電 ----------
@@ -1002,5 +1027,72 @@ if __name__ == "__main__":
     plt.title("Hourly Generation and Battery Charge/Discharge")
     plt.legend()
     plt.tight_layout()
+    plt.savefig("charts/Hourly Generation and Battery Charge or Discharge.png", dpi=200)
     plt.show()
+    
+        # ========= 圖 5：DER 損壞 / 修復 Timeline  =========
+    # 主圖：WT、DG、BAT
+    plt.figure(figsize=(12, 8))
+
+    def plot_timeline(ax, data, title, start_idx, end_idx, color_ok="green", color_bad="red"):
+        ax.set_title(title)
+        t = np.arange(start_idx, end_idx+1)
+
+        for unit_idx, series in enumerate(data):
+            status = np.array(series[start_idx:end_idx+1])
+
+            ax.plot(
+                t[status == 1],
+                [unit_idx] * np.sum(status == 1),
+                "|",
+                color=color_ok,
+                markersize=8,
+            )
+            ax.plot(
+                t[status == 0],
+                [unit_idx] * np.sum(status == 0),
+                "|",
+                color=color_bad,
+                markersize=8,
+            )
+
+        ax.set_yticks(range(len(data)))
+        ax.set_ylabel("Unit index")
+        ax.set_xlabel("Hour index")
+
+    start_idx = max(0, disturbance_start - 24)
+    end_idx = min(T_len - 1, disturbance_end + 168)
+
+    # WT
+    ax1 = plt.subplot(3,1,1)
+    plot_timeline(ax1, sim_result.U_WT_series, "WT Availability Timeline", start_idx, end_idx)
+
+    # DG
+    ax2 = plt.subplot(3,1,2)
+    plot_timeline(ax2, sim_result.U_DG_series, "DG Availability Timeline", start_idx, end_idx)
+
+    # Battery
+    ax3 = plt.subplot(3,1,3)
+    plot_timeline(ax3, sim_result.U_BAT_series, "Battery Availability Timeline", start_idx, end_idx)
+
+    plt.tight_layout()
+    plt.savefig("charts/DER Availability Timeline (WT-DG-BAT).png", dpi=200)
+    plt.show()
+
+    # ========= PV Availability Timeline（獨立一張大圖） =========
+    plt.figure(figsize=(14, 8))  # <-- 提高高度讓 PV 清楚顯示
+
+    plot_timeline(
+        plt.gca(),
+        sim_result.U_PV_series,
+        "PV Availability Timeline (Isolated)",
+        start_idx,
+        end_idx
+    )
+
+    plt.tight_layout()
+    plt.savefig("charts/PV Availability Timeline (Isolated).png", dpi=200)
+    plt.show()
+
+
     print("完成圖表繪製!")
