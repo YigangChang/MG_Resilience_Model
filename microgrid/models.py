@@ -56,6 +56,7 @@ class DisturbanceScenario:
     MTTR_BAT: float
     hazard: HazardProfile
     evaluation_horizon_hours: int = 168  # Resiliency Curve 評估窗（預設 7 天）
+    grid_MTTR_hours: int = 48   # 預設 48 小時
 
 
 @dataclass

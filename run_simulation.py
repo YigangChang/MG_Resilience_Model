@@ -78,6 +78,7 @@ if __name__ == "__main__":
         MTTR_PV=31.0,
         MTTR_DG=289.0,
         MTTR_BAT=3.0,
+        grid_MTTR_hours=48,
         hazard=hazard,
         evaluation_horizon_hours=168,
     )
@@ -139,7 +140,9 @@ if __name__ == "__main__":
         critical_load_ratio=0.2,
         random_seed=42,
     )
-
+    print("DG total output after tfr:",
+      sum(sim_result.P_dg[disturbance_end+1 : disturbance_end+48]))
+    
     Ey_total = sum(sim_result.Gt)
     Dy_total = sum(sim_result.demand)
     scale_to_year = 365.0 / days_in_dataset
@@ -179,3 +182,5 @@ if __name__ == "__main__":
         disturbance_end=disturbance_end,
         output_dir="charts",
     )
+    
+
