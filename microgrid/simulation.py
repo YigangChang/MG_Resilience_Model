@@ -12,7 +12,6 @@ from .models import (
     SimulationResult,
 )
 
-
 def simulate_microgrid_resilience(
     design: MicrogridDesign,
     scenario: DisturbanceScenario,
@@ -22,13 +21,26 @@ def simulate_microgrid_resilience(
 ) -> SimulationResult:
     """
     新版微電網韌性模擬：
-    - 主網停電：颱風期間(td~tfr) + 災後 MTTR 延長停電
-    - 災前 24 小時自動把 SOC 充電到 90%
-    - 災害期間：只供應 critical load
-    - 主網可用時：使用 RE + (可選) BESS 放電 + Grid 補足
-    - ★ 主電網恢復之後，柴油發電機強制關機（不再運轉）
+
+    - 主網停電：顯式停電區間為 [td, tfr]，並延長至 tfr + grid_MTTR_hours
+    - 災前 24 小時：主網可用時，電池 SOC 強制維持 90%（視為主網幫忙充電）
+        * 此期間不執行每日放電 / 一般 EMS 控制
+    - 災害 + 停電期間（主網不可用）：
+        * 只供應 critical load = critical_load_ratio * demand
+        * 供電順序：WT/PV -> DG -> BESS -> Unserved
+        * 電池 SOC 範圍：10% ~ 90%
+    - 主網可用期間（含非災期與復電後）：
+        * 負載 = 全部 demand
+        * 平常 SOC 範圍：B_min_soc_frac ~ B_max_soc_frac（例如 20%~80%）
+        * 每日 EMS：
+            - 00:00–06:00：強制充到 80% SOC（先用 RE，多的用 Grid）
+            - 18:00–22:00：放電到 20% SOC（用 BESS 供應部分負載）
+            - 其它時間：維持「RE 優先，其次 BESS，最後 Grid」的邏輯
+        * 主網可用時，使用者無缺電：service_level = 1
+    - 主網恢復後（t > grid_back_time）：柴油機強制不再啟動（U_DG = 0）
     """
 
+    # ===== 隨機種子 =====
     if random_seed is not None:
         random.seed(random_seed)
         np.random.seed(random_seed)
@@ -37,6 +49,7 @@ def simulate_microgrid_resilience(
     D_full = time_input.demand
     cf_WT_ts = time_input.cf_WT
     cf_PV_ts = time_input.cf_PV
+    hours_ts = time_input.hours  # 0~23
     T_len = len(D_full)
 
     n_WT = len(design.P_WT)
@@ -44,7 +57,7 @@ def simulate_microgrid_resilience(
     n_DG = len(design.P_DG)
     n_BAT = len(design.P_BAT)
 
-    # ===== 初始可用狀態 =====
+    # ===== 初始設備狀態 =====
     U_WT = [1] * n_WT
     U_PV = [1] * n_PV
     U_DG = [1] * n_DG
@@ -60,7 +73,7 @@ def simulate_microgrid_resilience(
     repair_DG = [None] * n_DG
     repair_BAT = [None] * n_BAT
 
-    # ===== 電池 SOC =====
+    # ===== 電池 SOC 初始 =====
     B = [[0.0] * T_len for _ in range(n_BAT)]
     for i in range(n_BAT):
         B[i][0] = design.B_init[i]
@@ -73,7 +86,6 @@ def simulate_microgrid_resilience(
     Gt = [0.0] * T_len
     Tt = [0.0] * T_len
     service_level = [1.0] * T_len
-
     D_effective = [0.0] * T_len
 
     P_wt_all = [0.0] * T_len
@@ -83,63 +95,68 @@ def simulate_microgrid_resilience(
     fuel_used = 0.0
     fuel_remaining = design.fuel_storage
 
-    # ===== 災害相關時間 =====
+    # ===== 災害時間 & 評估視窗 =====
     td = scenario.disturbance_start
     tfr = min(scenario.disturbance_end, T_len - 1)
     t_eval_end = min(T_len - 1, td + scenario.evaluation_horizon_hours)
-    grid_back_time = tfr + scenario.grid_MTTR_hours  # ★ 災後延長停電的主網恢復時間
+    grid_back_time = tfr + scenario.grid_MTTR_hours  # 延長停電後主網恢復時間
 
     # ===== PV/WT 災後 24 小時線性恢復 =====
     derate_PV = np.ones(T_len)
     derate_WT = np.ones(T_len)
     post_storm_window = 24
-
     for t in range(T_len):
         if tfr < t <= tfr + post_storm_window:
             alpha = (t - tfr) / post_storm_window
             derate_PV[t] = 0.6 + 0.4 * alpha
             derate_WT[t] = 0.6 + 0.4 * alpha
 
-    # ===== 電池溫度/應力降額 =====
+    # ===== 電池溫度/應力降額（用於 C-rate） =====
     temp_derate = np.ones(T_len)
     for t in range(T_len):
         h_wind = scenario.hazard.wind_speed[t]
         h_rain = scenario.hazard.rainfall[t]
-        hazard_factor_tmp = min(1.0, (h_wind / 25.0) ** 2 + (h_rain / 80.0) ** 2)
+        hazard_factor_tmp = min(
+            1.0,
+            (h_wind / 25.0) ** 2 + (h_rain / 80.0) ** 2,
+        )
         temp_derate[t] = 1.0 - 0.2 * hazard_factor_tmp
 
     # ======================================================
     #                     逐 小 時 模 擬
     # ======================================================
     for t in range(T_len):
-
-        # ===== 判斷此時主網是否可用 =====
+        # --- 狀態判斷 ---
         in_storm = (td <= t <= tfr)
         pre_storm = (t < td) and ((td - t) <= 24)
         grid_available = (t < td) or (t > grid_back_time)
 
         Dt_full = D_full[t]
+        hour = hours_ts[t] if hours_ts is not None else (t % 24)
 
-        # ===== 決定負載 & SOC 範圍 =====
+        # --- 決定負載 & SOC 範圍 ---
         if grid_available:
+            # 主網可用：全負載
             Dt = Dt_full
-            soc_min_frac = design.B_min_soc_frac
-            soc_max_frac = design.B_max_soc_frac
+            soc_min_frac = design.B_min_soc_frac   # eg. 0.2
+            soc_max_frac = design.B_max_soc_frac   # eg. 0.8
             if pre_storm:
+                # 災前 24h：SOC 上限允許到 90%
                 soc_max_frac = 0.90
         else:
+            # 主網停電：只供應 critical load
             Dt = Dt_full * critical_load_ratio
             soc_min_frac = 0.10
             soc_max_frac = 0.90
 
         D_effective[t] = Dt
 
-        # ★★★ 主電網恢復後（t > grid_back_time）強制 DG 關機，不再運轉 ★★★
+        # --- 主網恢復後強制 DG 不再運轉 ---
         if t > grid_back_time:
             for i in range(n_DG):
                 U_DG[i] = 0
 
-        # ===== 設備故障（只有停電期間才會有 hazard-based 故障） =====
+        # --- 設備故障（只在停電期間有 hazard-based 故障）---
         if not grid_available:
             hazard_factor = min(
                 1.0,
@@ -161,11 +178,11 @@ def simulate_microgrid_resilience(
 
         update_failure(U_WT, repair_WT, scenario.base_p_damage_WT, scenario.MTTR_WT)
         update_failure(U_PV, repair_PV, scenario.base_p_damage_PV, scenario.MTTR_PV)
-        # ★ DG 的故障/修復只在停電期間有意義，主網恢復後反正 U_DG 已被鎖 0
         if not grid_available:
             update_failure(U_DG, repair_DG, scenario.base_p_damage_DG, scenario.MTTR_DG)
         update_failure(U_BAT, repair_BAT, scenario.base_p_damage_BAT, scenario.MTTR_BAT)
 
+        # 紀錄可用狀態
         for i in range(n_WT):
             U_WT_series[i][t] = U_WT[i]
         for i in range(n_PV):
@@ -175,23 +192,19 @@ def simulate_microgrid_resilience(
         for i in range(n_BAT):
             U_BAT_series[i][t] = U_BAT[i]
 
-        # ===== 電池 SOC 傳遞 =====
+        # --- 電池 SOC 傳遞 ---
         if t > 0:
             for i in range(n_BAT):
                 B[i][t] = B[i][t - 1]
 
+        # SOC 邊界
         for i in range(n_BAT):
             B_max_i = design.B_max[i]
             soc_min = soc_min_frac * B_max_i
             soc_max = soc_max_frac * B_max_i
             B[i][t] = min(max(B[i][t], soc_min), soc_max)
 
-        # 災前 24 小時強制充電到 90%
-        if pre_storm:
-            for i in range(n_BAT):
-                B[i][t] = max(B[i][t], 0.90 * design.B_max[i])
-
-        # ===== WT / PV 出力 =====
+        # --- WT / PV 出力 ---
         P_wt_t = sum(
             design.P_WT[i] * cf_WT_ts[t] * design.A_WT * derate_WT[t]
             for i in range(n_WT)
@@ -209,8 +222,35 @@ def simulate_microgrid_resilience(
         P_wt_all[t] = P_wt_t
         P_pv_all[t] = P_pv_t
 
-        # ===== Diesel dispatch（只在停電期間使用，主網恢復後永遠不啟動） =====
+        # 預設 DG 為 0（以防早期 return/continue）
         P_dg_t = 0.0
+
+        # === 災前 24 小時：強制電池維持 90% SOC，略過 EMS / DG / Island 邏輯 ===
+        if pre_storm and grid_available:
+            target_soc = 0.90
+            for i in range(n_BAT):
+                B_max_i = design.B_max[i]
+                target_energy = target_soc * B_max_i
+
+                # 主網補足：若 SOC < 90%，直接拉到 90%
+                if B[i][t] < target_energy:
+                    B[i][t] = target_energy
+
+                # 當小時不允許充放電（避免 EMS override）
+                P_charge[i][t] = 0.0
+                P_discharge[i][t] = 0.0
+
+            # 使用者角度：Grid + RE 足以滿足 Dt
+            Gt[t] = Dt
+            Tt[t] = 0.0
+            curtailment[t] = 0.0
+            service_level[t] = 1.0
+
+            P_dg_all[t] = 0.0
+            Pt[t] = P_wt_t + P_pv_t + 0.0 + sum(design.P_BAT)
+            continue  # 跳過後續邏輯，進入下一個小時
+
+        # --- Diesel dispatch（只在停電期間使用）---
         if (not grid_available) and Dt > 0 and fuel_remaining > 0:
             residual = Dt - (P_wt_t + P_pv_t)
             for i in range(n_DG):
@@ -247,14 +287,15 @@ def simulate_microgrid_resilience(
         # ===== A. 主網停電模式（Island Mode） =====
         if not grid_available:
             P_gen_no_batt = P_wt_t + P_pv_t + P_dg_t
-            diff = Dt - P_gen_no_batt
+            diff = Dt - P_gen_no_batt  # >0 代表缺電，<0 代表多餘
 
+            # reset 當小時電池功率
             for i in range(n_BAT):
                 P_charge[i][t] = 0.0
                 P_discharge[i][t] = 0.0
 
             if diff < 0:
-                # 充電
+                # --- 多餘能量：充電 ---
                 surplus = -diff
                 for i in range(n_BAT):
                     if U_BAT[i] == 0:
@@ -287,7 +328,7 @@ def simulate_microgrid_resilience(
                 Tt[t] = 0.0
 
             elif diff > 0:
-                # 放電
+                # --- 缺電：放電 ---
                 deficit = diff
                 supply_b = 0.0
 
@@ -325,6 +366,7 @@ def simulate_microgrid_resilience(
                 Tt[t] = max(0.0, Dt - Gt[t])
 
             else:
+                # 剛好平衡
                 Gt[t] = Dt
                 Tt[t] = 0.0
 
@@ -332,83 +374,179 @@ def simulate_microgrid_resilience(
 
         # ===== B. 主網可用模式（Grid-connected Mode） =====
         else:
-            P_re = P_wt_t + P_pv_t
-            served_by_RE = min(P_re, Dt)
-            residual = Dt - served_by_RE
-            surplus_re = max(0.0, P_re - served_by_RE)
-
+            # reset 電池功率
             for i in range(n_BAT):
                 P_charge[i][t] = 0.0
                 P_discharge[i][t] = 0.0
 
-            supply_b = 0.0
-            if residual > 0:
-                for i in range(n_BAT):
-                    if U_BAT[i] == 0:
-                        continue
-                    if residual <= 0:
-                        break
+            # ---------------------------
+            # DAILY CHARGE / DISCHARGE EMS
+            # ---------------------------
+            CHARGE_START = 0      # 00:00
+            CHARGE_END   = 6      # [0,6)
+            DISCHARGE_START = 18  # 18:00
+            DISCHARGE_END   = 22  # [18,22)
 
+            target_soc_charge = 0.80
+            target_soc_discharge = 0.20
+
+            P_re = P_wt_t + P_pv_t
+
+            # -------- CASE 1：充電時段（每天充到 80%） --------
+            if CHARGE_START <= hour < CHARGE_END:
+                # 先由 RE 供負載
+                served_by_RE = min(P_re, Dt)
+                residual_load = Dt - served_by_RE
+                # RE 剩餘可用於充電
+                surplus = max(0.0, P_re - served_by_RE)
+
+                for i in range(n_BAT):
                     B_prev = B[i][t]
                     B_max_i = design.B_max[i]
-                    soc_min = soc_min_frac * B_max_i
+                    target_energy = target_soc_charge * B_max_i
 
-                    if B_prev <= soc_min:
+                    if B_prev >= target_energy:
+                        continue
+
+                    cap_limit = (target_energy - B_prev) / max(design.eta_c, 1e-9)
+                    P_rating = design.P_BAT[i] * temp_derate[t]
+                    P_c_rate = B_max_i * design.C_rate_charge
+                    P_max = min(P_rating, P_c_rate, cap_limit)
+
+                    # 先用 RE surplus 充
+                    charge_from_RE = min(surplus, P_max)
+                    B[i][t] = B_prev + charge_from_RE * design.eta_c
+                    P_charge[i][t] += charge_from_RE
+                    surplus -= charge_from_RE
+
+                    # 不足的部分用 Grid 補
+                    if B[i][t] < target_energy:
+                        remaining_energy = target_energy - B[i][t]
+                        charge_from_grid = min(
+                            P_max - charge_from_RE,
+                            remaining_energy / max(design.eta_c, 1e-9),
+                        )
+                        B[i][t] += charge_from_grid * design.eta_c
+                        P_charge[i][t] += charge_from_grid
+
+                # 使用者角度：Grid + RE 足以滿足 Dt
+                Gt[t] = Dt
+                Tt[t] = 0.0
+                curtailment[t] = max(0.0, surplus)
+                service_level[t] = 1.0
+
+            # -------- CASE 2：放電時段（每天放到 20%） --------
+            # ⚠ 災害前 24 小時不執行放電（已在 pre_storm 分支中被 continue 掉）
+            elif (DISCHARGE_START <= hour < DISCHARGE_END) and grid_available:
+                served_by_RE = min(P_re, Dt)
+                residual = Dt - served_by_RE
+                supply_b = 0.0
+
+                for i in range(n_BAT):
+                    B_prev = B[i][t]
+                    B_max_i = design.B_max[i]
+                    min_energy = target_soc_discharge * B_max_i
+
+                    if B_prev <= min_energy or residual <= 0:
                         continue
 
                     P_rating = design.P_BAT[i] * temp_derate[t]
                     P_c_rate = B_max_i * design.C_rate_discharge
-                    max_ac = (B_prev - soc_min) * design.eta_d
+                    energy_limit = (B_prev - min_energy) * design.eta_d
 
-                    P_max_discharge = min(P_rating, P_c_rate, max_ac)
-                    discharge = min(residual, P_max_discharge)
+                    P_max = min(P_rating, P_c_rate, energy_limit)
+                    discharge = min(residual, P_max)
                     if discharge <= 0:
                         continue
 
                     P_discharge[i][t] = discharge
-                    supply_b += discharge
+                    B[i][t] = B_prev - discharge / max(design.eta_d, 1e-9)
                     residual -= discharge
-                    B[i][t] = max(
-                        soc_min,
-                        B_prev - discharge / max(design.eta_d, 1e-9),
-                    )
+                    supply_b += discharge
 
-            # 主網補足剩餘負載
-            grid_supply = max(0.0, residual)
+                # 主網補足剩餘
+                grid_supply = max(0.0, residual)
 
-            # surplus RE → 充電
-            if surplus_re > 0:
-                for i in range(n_BAT):
-                    if U_BAT[i] == 0:
-                        continue
-                    if surplus_re <= 0:
-                        break
+                Gt[t] = Dt
+                Tt[t] = 0.0
+                curtailment[t] = 0.0
+                service_level[t] = 1.0
 
-                    B_prev = B[i][t]
-                    B_max_i = design.B_max[i]
-                    soc_max = soc_max_frac * B_max_i
+            # -------- CASE 3：一般 Grid-connected 狀態 --------
+            else:
+                P_re = P_wt_t + P_pv_t
+                served_by_RE = min(P_re, Dt)
+                residual = Dt - served_by_RE
+                surplus_re = max(0.0, P_re - served_by_RE)
 
-                    if B_prev >= soc_max:
-                        continue
+                supply_b = 0.0
+                if residual > 0:
+                    for i in range(n_BAT):
+                        if U_BAT[i] == 0:
+                            continue
+                        if residual <= 0:
+                            break
 
-                    P_rating = design.P_BAT[i] * temp_derate[t]
-                    P_c_rate = B_max_i * design.C_rate_charge
-                    P_cap_limit = (soc_max - B_prev) / max(design.eta_c, 1e-9)
+                        B_prev = B[i][t]
+                        B_max_i = design.B_max[i]
+                        soc_min = soc_min_frac * B_max_i
 
-                    P_max_charge = min(P_rating, P_c_rate, P_cap_limit)
-                    charge = min(surplus_re, P_max_charge)
-                    if charge <= 0:
-                        continue
+                        if B_prev <= soc_min:
+                            continue
 
-                    P_charge[i][t] = charge
-                    B[i][t] = B_prev + charge * design.eta_c
-                    surplus_re -= charge
+                        P_rating = design.P_BAT[i] * temp_derate[t]
+                        P_c_rate = B_max_i * design.C_rate_discharge
+                        max_ac = (B_prev - soc_min) * design.eta_d
 
-            curtailment[t] = surplus_re
-            Gt[t] = Dt
-            Tt[t] = 0.0
-            service_level[t] = 1.0
+                        P_max_discharge = min(P_rating, P_c_rate, max_ac)
+                        discharge = min(residual, P_max_discharge)
+                        if discharge <= 0:
+                            continue
 
+                        P_discharge[i][t] = discharge
+                        supply_b += discharge
+                        residual -= discharge
+                        B[i][t] = max(
+                            soc_min,
+                            B_prev - discharge / max(design.eta_d, 1e-9),
+                        )
+
+                grid_supply = max(0.0, residual)
+
+                # surplus RE 充電
+                if surplus_re > 0:
+                    for i in range(n_BAT):
+                        if U_BAT[i] == 0:
+                            continue
+                        if surplus_re <= 0:
+                            break
+
+                        B_prev = B[i][t]
+                        B_max_i = design.B_max[i]
+                        soc_max = soc_max_frac * B_max_i
+
+                        if B_prev >= soc_max:
+                            continue
+
+                        P_rating = design.P_BAT[i] * temp_derate[t]
+                        P_c_rate = B_max_i * design.C_rate_charge
+                        cap_limit = (soc_max - B_prev) / max(design.eta_c, 1e-9)
+
+                        P_max = min(P_rating, P_c_rate, cap_limit)
+                        charge = min(surplus_re, P_max)
+                        if charge <= 0:
+                            continue
+
+                        P_charge[i][t] = charge
+                        B[i][t] = B_prev + charge * design.eta_c
+                        surplus_re -= charge
+
+                curtailment[t] = surplus_re
+                Gt[t] = Dt
+                Tt[t] = 0.0
+                service_level[t] = 1.0
+
+        # ===== 統一計算 Pt（每一小時結尾） =====
         Pt[t] = P_wt_t + P_pv_t + P_dg_t + sum(design.P_BAT)
 
     # ======================================================
