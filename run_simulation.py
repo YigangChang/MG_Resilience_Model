@@ -22,52 +22,50 @@ from microgrid.simulation import simulate_microgrid_resilience
 from microgrid.cost import compute_LCOE, compute_LCOED
 from microgrid.plotting import plot_all_figures
 
+# ✨ 你新增的工具函式
+from microgrid.weather_utils import build_time_input, build_hazard_from_weather
+
 
 if __name__ == "__main__":
     os.makedirs("charts", exist_ok=True)
 
-    # 讀取 5~11 月時間序列
-    df = pd.read_csv("Microgrid_5to11_months_timeseries.csv")
-    df["timestamp"] = pd.to_datetime(df["timestamp"])
+    # ============================================================
+    # 1. 讀取莫拉克颱風整合後的天氣 + 負載資料
+    # ============================================================
+    df_weather = pd.read_csv("Morakot_weather_with_demand.csv")
+    df_weather["datetime"] = pd.to_datetime(df_weather["datetime"])
+    df_weather["timestamp"] = df_weather["datetime"]
 
-    demand_series = df["demand_kW"].tolist()
-    cf_pv_series = df["pv_cf"].tolist()
-    cf_wt_series = df["wt_cf"].tolist()
-    hours_of_day = df["hour_of_day"].tolist()
-    months_series = df["timestamp"].dt.month.tolist()
-    days_series = df["timestamp"].dt.day.tolist()
 
-    total_hours = len(df)
-    days_in_dataset = total_hours / 24.0
+    # demand_series 應該與 weather 長度一致
+    demand_series = df_weather["demand"].tolist()
+    N = len(df_weather)
+    days_in_dataset = N / 24.0
 
-    hazard = HazardProfile(
-        time_h=list(range(total_hours)),
-        wind_speed=df["wind_speed_m_s"].tolist(),
-        rainfall=df["rain_mm_hr"].tolist(),
-        solar_irradiance=df["solar_irr_ratio"].tolist(),
-    )
+    # ============================================================
+    # 2. time_input（CF_WT, CF_PV, demand, hours）
+    # ============================================================
+    time_input = build_time_input(df_weather, demand_series)
 
-    time_input = TimeSeriesInput(
-        demand=demand_series,
-        cf_WT=cf_wt_series,
-        cf_PV=cf_pv_series,
-        hours=hours_of_day,
-    )
+    # ============================================================
+    # 3. hazard（給 DisturbanceScenario）
+    # ============================================================
+    hazard = build_hazard_from_weather(df_weather)
 
-    # 找出 8/7 00:00 作為颱風開始時間
-    disturbance_start = None
-    for idx in range(total_hours):
-        if months_series[idx] == 8 and days_series[idx] == 7 and hours_of_day[idx] == 0:
-            disturbance_start = idx
-            break
-    if disturbance_start is None:
-        raise RuntimeError("找不到 8/7 00:00 的 disturbance_start，請檢查時間序列資料。")
+    # 颱風開始與結束
+    td_ts = pd.Timestamp("2009-08-07 00:00:00")
+    tfr_ts = pd.Timestamp("2009-08-10 00:00:00")
 
-    disturbance_duration_h = 72  # 3 天
-    disturbance_end = min(total_hours - 1, disturbance_start + disturbance_duration_h)
+    try:
+        disturbance_start = df_weather.index[df_weather["datetime"] == td_ts][0]
+        disturbance_end = df_weather.index[df_weather["datetime"] == tfr_ts][0]
+    except IndexError:
+        disturbance_start = (df_weather["datetime"] - td_ts).abs().idxmin()
+        disturbance_end = (df_weather["datetime"] - tfr_ts).abs().idxmin()
 
+    # DisturbanceScenario
     scenario_hurricane = DisturbanceScenario(
-        name="Morakot_like",
+        name="Morakot_2009",
         disturbance_start=disturbance_start,
         disturbance_end=disturbance_end,
         base_p_damage_WT=0.10,
@@ -83,13 +81,15 @@ if __name__ == "__main__":
         evaluation_horizon_hours=168,
     )
 
-    # 微電網設計：
+    # ============================================================
+    # 4. 微電網設計
+    # ============================================================
     P_DG_units = [5000.0] * 1   # 1 台 5 MW
 
     B_max_list = [4000.0] * 1
-    B_init_list = [b * 0.8 for b in B_max_list]  # 平時 80% SOC
+    B_init_list = [b * 0.8 for b in B_max_list]
 
-    fuel_rate_max = 350.0  # [gal/hr] @ rated
+    fuel_rate_max = 350.0  # gal/hr
     days_fuel = 3
     fuel_storage_required = fuel_rate_max * 24 * days_fuel * len(P_DG_units)
 
@@ -132,7 +132,9 @@ if __name__ == "__main__":
         wacc=0.05,
     )
 
-    # 跑模擬
+    # ============================================================
+    # 5. 模擬
+    # ============================================================
     sim_result = simulate_microgrid_resilience(
         design=design_example,
         scenario=scenario_hurricane,
@@ -140,11 +142,16 @@ if __name__ == "__main__":
         critical_load_ratio=0.2,
         random_seed=42,
     )
+
     print("DG total output after tfr:",
-      sum(sim_result.P_dg[disturbance_end+1 : disturbance_end+48]))
-    
+          sum(sim_result.P_dg[disturbance_end+1 : disturbance_end+48]))
+
+    # ============================================================
+    # 6. LCOE / LCOED
+    # ============================================================
     Ey_total = sum(sim_result.Gt)
     Dy_total = sum(sim_result.demand)
+
     scale_to_year = 365.0 / days_in_dataset
     Ey_year = [Ey_total * scale_to_year]
     Dy_year = [Dy_total * scale_to_year]
@@ -165,6 +172,9 @@ if __name__ == "__main__":
         fuel_price_per_gal=97.0,
     )
 
+    # ============================================================
+    # 7. 印結果
+    # ============================================================
     print("===== Microgrid Resilience & Cost Result =====")
     print(f"Invulnerability         : {sim_result.invulnerability:.3f}")
     print(f"Resilience (curve)      : {sim_result.resilience_curve:.3f}")
@@ -173,14 +183,14 @@ if __name__ == "__main__":
     print(f"LCOE  [$ / kWh]         : {LCOE_val:.4f}")
     print(f"LCOED[$ / kWh]         : {LCOED_val:.4f}")
 
-    # 繪圖
+    # ============================================================
+    # 8. 繪圖
+    # ============================================================
     plot_all_figures(
-        df=df,
+        df=df_weather,
         sim_result=sim_result,
         scenario=scenario_hurricane,
         disturbance_start=disturbance_start,
         disturbance_end=disturbance_end,
         output_dir="charts",
     )
-    
-
