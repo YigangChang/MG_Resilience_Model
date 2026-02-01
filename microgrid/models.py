@@ -57,7 +57,7 @@ class DisturbanceScenario:
     hazard: HazardProfile
     evaluation_horizon_hours: int = 168  # Resiliency Curve 評估窗（預設 7 天）
     grid_MTTR_hours: int = 48   # 預設 48 小時 Grid reconnection time
-
+    annual_occurrence_rate: float = 0.1  # 預設每年發生次數
 
 @dataclass
 class TimeSeriesInput:
@@ -72,8 +72,7 @@ class SimulationResult:
     NPR: float
     CLSR: float
     EID: float
-    EENS: float
-    
+   
     Pt: List[float] # total power generation at time t 微電網設備的總容量或總輸出功率，包括 WT、PV、DG 和電池
     Gt: List[float] #實際供應給負載的電力，時間序列記錄
     Tt: List[float] #unserved energy at time t 未供應的電力需求，時間序列記錄
@@ -120,5 +119,9 @@ class CostParameters:
     H_DG: List[float]
     H_BAT: List[float]
 
-    planning_horizon_years: int
-    wacc: float #折現率
+    VOLL: float #Value of Lost Load ($/kWh)
+    C_fix_baseline: float #Baseline fixed cost ($/year)
+    C_fix_strategy: float    # $/year (battery + DG annualized)
+    fuel_price_per_gal: float #Fuel price ($/gal)
+    #planning_horizon_years: int
+    #wacc: float #折現率

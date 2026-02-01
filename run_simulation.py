@@ -19,7 +19,7 @@ from microgrid.models import (
     CostParameters,
 )
 from microgrid.simulation import simulate_microgrid_resilience
-from microgrid.cost import compute_LCOE, compute_LCOED
+from microgrid.cost import evaluate_designs, compare_baseline_and_strategies
 from microgrid.plotting import plot_all_figures
 
 # ✨ 你新增的工具函式
@@ -68,10 +68,12 @@ if __name__ == "__main__":
         name="Morakot_2009",
         disturbance_start=disturbance_start,
         disturbance_end=disturbance_end,
+        # Failure probabilities
         base_p_damage_WT=0.10,
         base_p_damage_PV=0.05,
         base_p_damage_DG=0.01,
         base_p_damage_BAT=0.01,
+        # Mean time to repair (hours)
         MTTR_WT=72.0,
         MTTR_PV=31.0,
         MTTR_DG=289.0,
@@ -79,42 +81,130 @@ if __name__ == "__main__":
         grid_MTTR_hours=48,
         hazard=hazard,
         evaluation_horizon_hours=168,
+        annual_occurrence_rate=0.1,
     )
 
     # ============================================================
     # 4. 微電網設計
     # ============================================================
-    P_DG_units = [5000.0] * 1   # 1 台 5 MW  #!
+    
+    def compute_fuel_storage(
+    fuel_rate_max: float,
+    days_fuel: int,
+    P_DG: list,
+) -> float:
+        """
+        Compute required fuel storage based on number of DG units.
+        fuel_rate_max: gal/hr per DG
+        days_fuel: fuel autonomy in days
+        P_DG: list of DG capacities
+        """
+        n_dg = len(P_DG)
+        return fuel_rate_max * 24 * days_fuel * n_dg
 
-    B_max_list = [4000.0] * 5     #!
+    
+    B_max_list = [4000.0] * 5
     B_init_list = [b * 0.8 for b in B_max_list]
 
-    fuel_rate_max = 350.0  # gal/hr
-    days_fuel = 7     #!
-    fuel_storage_required = fuel_rate_max * 24 * days_fuel * len(P_DG_units)
+    fuel_rate_max = 350.0  # gal/hr per DG
+    days_fuel = 7
 
-    design_example = MicrogridDesign(
-        P_WT=[2000.0] * 5,
-        P_PV=[1000.0] * 20,
-        P_DG=P_DG_units,
-        P_BAT=[2000.0] * 5,  #!
-        B_max=B_max_list,
-        B_init=B_init_list,
-        eta_c=0.97,
-        eta_d=0.98,
-        C_WT=0.22,
-        C_PV=0.36,
-        A_WT=0.98,
-        fuel_rate_max=fuel_rate_max,
-        fuel_storage=fuel_storage_required,
-        DG_min_loading=0.2,
-        DG_max_loading=0.8,
-        B_min_soc_frac=0.2,
-        B_max_soc_frac=0.8,
-        C_rate_charge=1.0,
-        C_rate_discharge=1.0,
+    designs = []
+
+    # =========================
+    # 0️⃣ Baseline design
+    # =========================
+    P_DG_0 = [5000.0] * 1
+
+    designs.append(
+        MicrogridDesign(
+            P_WT=[2000.0] * 5,
+            P_PV=[1000.0] * 20,
+            P_DG=P_DG_0,
+            P_BAT=[2000.0] * 1,
+            B_max=B_max_list,
+            B_init=B_init_list,
+            eta_c=0.97,
+            eta_d=0.98,
+            C_WT=0.22,
+            C_PV=0.36,
+            A_WT=0.98,
+            fuel_rate_max=fuel_rate_max,
+            fuel_storage=compute_fuel_storage(
+                fuel_rate_max, days_fuel, P_DG_0
+            ),
+            DG_min_loading=0.2,
+            DG_max_loading=0.8,
+            B_min_soc_frac=0.2,
+            B_max_soc_frac=0.8,
+            C_rate_charge=1.0,
+            C_rate_discharge=1.0,
+        )
     )
 
+    # =========================
+    # 1️⃣ Strategy: add more batteries
+    # =========================
+    P_DG_1 = [5000.0] * 1
+
+    designs.append(
+        MicrogridDesign(
+            P_WT=[2000.0] * 5,
+            P_PV=[1000.0] * 20,
+            P_DG=P_DG_1,
+            P_BAT=[2000.0] * 5,
+            B_max=B_max_list,
+            B_init=B_init_list,
+            eta_c=0.97,
+            eta_d=0.98,
+            C_WT=0.22,
+            C_PV=0.36,
+            A_WT=0.98,
+            fuel_rate_max=fuel_rate_max,
+            fuel_storage=compute_fuel_storage(
+                fuel_rate_max, days_fuel, P_DG_1
+            ),
+            DG_min_loading=0.2,
+            DG_max_loading=0.8,
+            B_min_soc_frac=0.2,
+            B_max_soc_frac=0.8,
+            C_rate_charge=1.0,
+            C_rate_discharge=1.0,
+        )
+    )
+
+    # =========================
+    # 2️⃣ Strategy: add more batteries + more diesels
+    # =========================
+    P_DG_2 = [5000.0] * 2
+
+    designs.append(
+        MicrogridDesign(
+            P_WT=[2000.0] * 5,
+            P_PV=[1000.0] * 20,
+            P_DG=P_DG_2,
+            P_BAT=[2000.0] * 5,
+            B_max=B_max_list,
+            B_init=B_init_list,
+            eta_c=0.97,
+            eta_d=0.98,
+            C_WT=0.22,
+            C_PV=0.36,
+            A_WT=0.98,
+            fuel_rate_max=fuel_rate_max,
+            fuel_storage=compute_fuel_storage(
+                fuel_rate_max, days_fuel, P_DG_2
+            ),
+            DG_min_loading=0.2,
+            DG_max_loading=0.8,
+            B_min_soc_frac=0.2,
+            B_max_soc_frac=0.8,
+            C_rate_charge=1.0,
+            C_rate_discharge=1.0,
+        )
+    )
+
+    
     cost_params = CostParameters(
         I_WT=[81_100_000.0]*5,
         I_PV=[57_500_000.0]*20,
@@ -128,65 +218,94 @@ if __name__ == "__main__":
         H_PV=[20_000_000.0]*20,
         H_DG=[16_000_000.0],
         H_BAT=[5_200_000.0],
-        planning_horizon_years=10,
-        wacc=0.05,
+        VOLL=1000.0, #Value of Lost Load ($/kWh)
+        C_fix_baseline=1000000.0, #Baseline fixed cost ($/year)
+        C_fix_strategy=1200000.0,    # $/year (battery + DG annualized)
+        fuel_price_per_gal=3.5, #Fuel price ($/gal)
+        #planning_horizon_years=10,
+        #wacc=0.05, 
     )
 
     # ============================================================
     # 5. 模擬
     # ============================================================
-    sim_result = simulate_microgrid_resilience(
-        design=design_example,
-        scenario=scenario_hurricane,
-        time_input=time_input,
-        critical_load_ratio=0.2,
-        random_seed=42,
-    )
+    # `designs` is a list — run simulation for each design and collect results
+    sim_results = []
+    for idx, design in enumerate(designs):
+        sim = simulate_microgrid_resilience(
+            design=design,
+            scenario=scenario_hurricane,
+            time_input=time_input,
+            critical_load_ratio=0.2,
+            random_seed=42 + idx,
+        )
+        sim_results.append(sim)
+
+    # keep compatibility with existing downstream code: use first design as baseline
+    sim_result = sim_results[0]
+
+    # 列印每個 design 的模擬摘要（EENS / EENS_ratio / LOLE / fuel_used）
+    for i, sim in enumerate(sim_results):
+        print(f"--- Design {i} summary ---")
+        print(
+            f"EENS: {sim.EENS}, EENS_ratio: {sim.EENS_ratio}, LOLE: {sim.LOLE}, "
+            f"critical_load_survival_time: {sim.critical_load_survival_time}, fuel_used: {sim.fuel_used}"
+        )
 
     print("DG total output after tfr:",
           sum(sim_result.P_dg[disturbance_end+1 : disturbance_end+48]))
 
     # ============================================================
-    # 6. LCOE / LCOED
+    # 6. Cost 評估
     # ============================================================
-    Ey_total = sum(sim_result.Gt)
-    Dy_total = sum(sim_result.demand)
 
-    scale_to_year = 365.0 / days_in_dataset
-    Ey_year = [Ey_total * scale_to_year]
-    Dy_year = [Dy_total * scale_to_year]
-
-    LCOE_val = compute_LCOE(
+    results = evaluate_designs(
+        designs=designs,
+        scenario=scenario_hurricane,
+        time_input=time_input,
         cost=cost_params,
-        Ey_year=Ey_year,
-        fuel_used_sim=sim_result.fuel_used,
-        days_simulated=days_in_dataset,
-        fuel_price_per_gal=97.0,
+        days_in_dataset=days_in_dataset,
     )
 
-    LCOED_val = compute_LCOED(
+    rbcr_results = compare_baseline_and_strategies(
+        results=results,
         cost=cost_params,
-        Dy_year=Dy_year,
-        fuel_used_sim=sim_result.fuel_used,
-        days_simulated=days_in_dataset,
-        fuel_price_per_gal=97.0,
+        scenario=scenario_hurricane,
+        baseline_index=0,
     )
 
     # ============================================================
     # 7. 印結果
     # ============================================================
-    print("===== Microgrid Resilience & Cost Result =====")
-    print(f"Invulnerability         : {sim_result.invulnerability:.3f}")
-    print(f"Resilience (curve)      : {sim_result.resilience_curve:.3f}")
-    print(f"Recovery time [h]       : {sim_result.recovery_time_h}")
-    print(f"Total fuel used [gal]   : {sim_result.fuel_used:.1f}")
-    print(f"LCOE  [$ / kWh]         : {LCOE_val:.4f}")
-    print(f"LCOED[$ / kWh]         : {LCOED_val:.4f}")
-    print("EENS:", sim_result.EENS)
-    print("EENS_ratio:", sim_result.EENS_ratio)
-    print("LOLE:", sim_result.LOLE)
-    print("Critical load survival (h):", sim_result.critical_load_survival_time)
-    print("Fuel sustainability (h):", sim_result.fuel_sustainability_h)
+    print("===== Microgrid Resilience & Cost Result (per design) =====")
+    
+    # Print baseline (Design 0) resilience metrics
+    print(f"\nBaseline Design (Design 0):")
+    print(f"  EENS: {results[0]['EENS']:.1f}")
+    print(f"  EID: {results[0]['EID']:.1f}")
+    print(f"  NPR: {results[0]['NPR']:.3f}")
+    print(f"  CPSO: {results[0]['CPSO']:.4f}")
+    print(f"  CPH: {results[0]['CPH']:.4f}")
+    print(f"  EARC: {results[0]['EARC']:.4f}")
+    print(f"  Fuel used: {results[0]['fuel_used']:.1f} gal")
+    
+    # Print comparison results (strategies vs baseline)
+    if len(rbcr_results) > 0:
+        print(f"\nStrategy Comparison (vs Baseline):")
+        for comp in rbcr_results:
+            strategy_idx = comp['strategy_index']
+            a_eens = comp['A_EENS'] if comp['A_EENS'] is not None else 0.0
+            rbcr = comp['RBCR'] if comp['RBCR'] is not None else 0.0
+            print(f"  Design {strategy_idx} vs Design {comp['baseline_index']}:")
+            print(f"    A_EENS: {a_eens:.4f}")
+            print(f"    RBCR: {rbcr:.4f}")
+    
+    # Print all design summaries
+    print(f"\nAll Designs Summary:")
+    for i, res in enumerate(results):
+        print(f"  Design {i}: EENS={res['EENS']:.1f}, fuel_used={res['fuel_used']:.1f}, CPSO={res['CPSO']:.4f}, CPH={res['CPH']:.4f}, EARC={res['EARC']:.4f}")
+    
+    print(f"\nBaseline fuel sustainability (h): {sim_result.fuel_sustainability_h}")
     # ============================================================
     # 8. 繪圖
     # ============================================================
