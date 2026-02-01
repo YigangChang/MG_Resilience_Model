@@ -84,20 +84,20 @@ if __name__ == "__main__":
     # ============================================================
     # 4. 微電網設計
     # ============================================================
-    P_DG_units = [5000.0] * 1   # 1 台 5 MW
+    P_DG_units = [5000.0] * 1   # 1 台 5 MW  #!
 
-    B_max_list = [4000.0] * 1
+    B_max_list = [4000.0] * 5     #!
     B_init_list = [b * 0.8 for b in B_max_list]
 
     fuel_rate_max = 350.0  # gal/hr
-    days_fuel = 3
+    days_fuel = 7     #!
     fuel_storage_required = fuel_rate_max * 24 * days_fuel * len(P_DG_units)
 
     design_example = MicrogridDesign(
         P_WT=[2000.0] * 5,
         P_PV=[1000.0] * 20,
         P_DG=P_DG_units,
-        P_BAT=[2000.0] * 1,
+        P_BAT=[2000.0] * 5,  #!
         B_max=B_max_list,
         B_init=B_init_list,
         eta_c=0.97,
@@ -182,7 +182,11 @@ if __name__ == "__main__":
     print(f"Total fuel used [gal]   : {sim_result.fuel_used:.1f}")
     print(f"LCOE  [$ / kWh]         : {LCOE_val:.4f}")
     print(f"LCOED[$ / kWh]         : {LCOED_val:.4f}")
-
+    print("EENS:", sim_result.EENS)
+    print("EENS_ratio:", sim_result.EENS_ratio)
+    print("LOLE:", sim_result.LOLE)
+    print("Critical load survival (h):", sim_result.critical_load_survival_time)
+    print("Fuel sustainability (h):", sim_result.fuel_sustainability_h)
     # ============================================================
     # 8. 繪圖
     # ============================================================

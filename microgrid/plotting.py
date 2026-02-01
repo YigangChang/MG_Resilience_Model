@@ -109,13 +109,15 @@ def plot_all_figures(
     plt.savefig(os.path.join(output_dir, "Resilience_Curve_Service_Level.png"), dpi=200)
     plt.show()
 
-    # ===== 圖 4：各機組發電 + 電池充放電 =====
+    # ===== 圖 4：各機組發電 + 電池充放電 =====~~~
     plt.figure(figsize=(12, 5))
     plt.plot(timestamp_window, P_wt_window, label="Wind generation [kW]")
     plt.plot(timestamp_window, P_pv_window, label="Solar generation [kW]")
     plt.plot(timestamp_window, P_dg_window, label="Diesel generation [kW]")
     plt.plot(timestamp_window, P_charge_total_window, label="Battery charge (total) [kW]")
     plt.plot(timestamp_window, P_discharge_total_window, label="Battery discharge (total) [kW]")
+    plt.axvline(df["timestamp"].iloc[disturbance_start], linestyle="--", label="Disturbance start")
+    plt.axvline(df["timestamp"].iloc[disturbance_end], linestyle="--", label="Disturbance end")
     plt.xlabel("Time")
     plt.ylabel("Power [kW]")
     plt.title("Hourly Generation and Battery Charge/Discharge")

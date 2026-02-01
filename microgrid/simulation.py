@@ -28,6 +28,7 @@ def simulate_microgrid_resilience(
     - 災害 + 停電期間（主網不可用）：
         * 只供應 critical load = critical_load_ratio * demand
         * 供電順序：WT/PV -> DG -> BESS -> Unserved
+        (*供電順序：WT/PV -> BESS -> DG -> Unserved??) 可嘗試?
         * 電池 SOC 範圍：10% ~ 90%
     - 主網可用期間（含非災期與復電後）：
         * 負載 = 全部 demand
@@ -550,7 +551,7 @@ def simulate_microgrid_resilience(
         Pt[t] = P_wt_t + P_pv_t + P_dg_t + sum(design.P_BAT)
 
     # ======================================================
-    #          韌性指標：Invulnerability + Resilience Curve
+    #                       韌性指標
     # ======================================================
     P_td = Pt[td] if 0 <= td < T_len else 0.0
     P_ts = Pt[tfr] if 0 <= tfr < T_len else 0.0
@@ -566,6 +567,42 @@ def simulate_microgrid_resilience(
             if all(service_level[k] >= 0.95 for k in range(t, t_eval_end + 1)):
                 recovery_time_h = t - td
                 break
+    
+    # 1. EENS (Energy Not Served)
+    EENS = sum(Tt[t] for t in range(td, t_eval_end + 1))
+    EENS = round(EENS, 1)
+    # 2. LOLE (Loss of Load Expectation = 缺電小時數)
+    LOLE = sum(1 for t in range(td, t_eval_end + 1) if Tt[t] > 1e-6)
+
+    # 3. Critical Load Survival Time
+    survival = 0
+    for t in range(td, t_eval_end + 1):
+        if Tt[t] <= 1e-6:   # 完全供應 critical load
+            survival += 1
+        else:
+            break
+    critical_load_survival_time = survival
+    
+    # 4. Fuel Sustainability = 若燃料耗盡率維持災期平均，其可撐多久
+    fuel_sustainability_h = 9999   # default: 幾乎無限制
+    if fuel_used > 0:
+        storm_hours = max(1, tfr - td + 1)
+        avg_hourly_fuel = fuel_used / storm_hours
+        if avg_hourly_fuel > 0:
+            fuel_sustainability_h = fuel_remaining / avg_hourly_fuel
+            fuel_sustainability_h = round(fuel_sustainability_h, 1)
+    
+    # 5. EENS Ratio
+    # 災害期間總 critical load 能量（分母）
+    total_critical_energy = sum(
+    D_effective[t] for t in range(td, t_eval_end + 1))
+    if total_critical_energy > 0:
+        EENS_ratio = EENS / total_critical_energy
+        EENS_ratio = round(EENS_ratio, 2)
+    else:
+        EENS_ratio = 0.0
+
+    
 
     return SimulationResult(
         invulnerability=invulnerability,
@@ -588,4 +625,10 @@ def simulate_microgrid_resilience(
         U_PV_series=U_PV_series,
         U_DG_series=U_DG_series,
         U_BAT_series=U_BAT_series,
+        
+        EENS=EENS,
+        LOLE=LOLE,
+        critical_load_survival_time=critical_load_survival_time,
+        fuel_sustainability_h=fuel_sustainability_h,
+        EENS_ratio=EENS_ratio,
     )
