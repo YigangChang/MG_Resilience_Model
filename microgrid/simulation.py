@@ -553,24 +553,12 @@ def simulate_microgrid_resilience(
     # ======================================================
     #                       韌性指標
     # ======================================================
-    P_td = Pt[td] if 0 <= td < T_len else 0.0
-    P_ts = Pt[tfr] if 0 <= tfr < T_len else 0.0
-    invulnerability = (P_ts / P_td) if P_td > 0 else 0.0
 
-    num = sum(1.0 - service_level[t] for t in range(td, t_eval_end + 1))
-    den = max(1, t_eval_end - td + 1)
-    resilience_curve = max(0.0, 1.0 - num / den)
-
-    recovery_time_h = None
-    for t in range(tfr, t_eval_end + 1):
-        if service_level[t] >= 0.99:
-            if all(service_level[k] >= 0.95 for k in range(t, t_eval_end + 1)):
-                recovery_time_h = t - td
-                break
     
     # 1. EENS (Energy Not Served)
     EENS = sum(Tt[t] for t in range(td, t_eval_end + 1))
     EENS = round(EENS, 1)
+    
     # 2. LOLE (Loss of Load Expectation = 缺電小時數)
     LOLE = sum(1 for t in range(td, t_eval_end + 1) if Tt[t] > 1e-6)
 
@@ -602,12 +590,49 @@ def simulate_microgrid_resilience(
     else:
         EENS_ratio = 0.0
 
+    #新增韌性指標
+    # ===== Resilience Metrics (Standard Definitions) =====
+    dt = 1.0  # hours
+    eval_range = range(td, t_eval_end + 1)
     
+    # Reference power: 災前 critical load（第一個災前小時）
+    # 1. Nadir Performance Ratio (NPR)
+    if td > 0:
+        P_ref = D_effective[td - 1]
+    else:
+        P_ref = max(D_effective)
+
+    P_min = min(Pt[t] for t in eval_range)
+    NPR = P_min / P_ref if P_ref > 0 else 0.0
+    NPR = round(NPR, 3)
+
+    # 2. Critical Load Survival Ratio (CLSR)
+    critical_supply = sum(Gt[t] * dt for t in eval_range)
+    critical_demand = sum(D_effective[t] * dt for t in eval_range)
+
+    CLSR = (
+        critical_supply / critical_demand
+        if critical_demand > 0
+        else 0.0
+    )
+
+    CLSR = round(CLSR, 3)
+
+    # 3. Energy Imbalance Duration (EID)
+    alpha = 0.9  # minimum acceptable critical load supply ratio
+
+    EID = sum(
+        1
+        for t in eval_range
+        if D_effective[t] > 0
+        and (Gt[t] / D_effective[t]) >= alpha
+    ) * dt
+
+    EID = round(EID, 1)
+
+
 
     return SimulationResult(
-        invulnerability=invulnerability,
-        resilience_curve=resilience_curve,
-        recovery_time_h=recovery_time_h,
         Pt=Pt,
         Gt=Gt,
         Tt=Tt,
@@ -617,6 +642,7 @@ def simulate_microgrid_resilience(
         P_discharge=P_discharge,
         curtailment=curtailment,
         fuel_used=fuel_used,
+        fuel_remaining=fuel_remaining,
         service_level=service_level,
         P_wt=P_wt_all,
         P_pv=P_pv_all,
@@ -631,4 +657,7 @@ def simulate_microgrid_resilience(
         critical_load_survival_time=critical_load_survival_time,
         fuel_sustainability_h=fuel_sustainability_h,
         EENS_ratio=EENS_ratio,
+        NPR=NPR,
+        CLSR=CLSR,
+        EID=EID
     )

@@ -84,6 +84,7 @@ class SimulationResult:
     curtailment: List[float]
 
     fuel_used: float
+    fuel_remaining: float  # 剩餘燃料量 (加侖)
     service_level: List[float] #Load met ratio at each hour (0~1)
 
     P_wt: List[float]
