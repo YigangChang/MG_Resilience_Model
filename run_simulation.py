@@ -17,6 +17,7 @@ from microgrid.models import (
     DisturbanceScenario,
     MicrogridDesign,
     CostParameters,
+    EMSPolicy,
 )
 from microgrid.simulation import simulate_microgrid_resilience
 from microgrid.cost import evaluate_designs, compare_baseline_and_strategies
@@ -226,6 +227,16 @@ if __name__ == "__main__":
         #wacc=0.05, 
     )
 
+    ems_policy = EMSPolicy(
+        pre_event_hours=24,
+        pre_event_target_soc=0.90,
+        pre_event_soc_max=0.90,
+        dg_start_soc=0.30,
+        dg_stop_soc=0.70,
+        load_tier_multipliers=[1.0, 0.6, 0.3],
+        load_tier_soc_thresholds=[0.5, 0.3],
+    )
+
     # ============================================================
     # 5. 模擬
     # ============================================================
@@ -238,6 +249,7 @@ if __name__ == "__main__":
             time_input=time_input,
             critical_load_ratio=0.2,
             random_seed=42 + idx,
+            ems_policy=ems_policy,
         )
         sim_results.append(sim)
 
@@ -265,6 +277,7 @@ if __name__ == "__main__":
         time_input=time_input,
         cost=cost_params,
         days_in_dataset=days_in_dataset,
+        ems_policy=ems_policy,
     )
 
     rbcr_results = compare_baseline_and_strategies(

@@ -1,7 +1,7 @@
 # microgrid/cost.py
 from typing import List, Dict, Optional
 
-from .models import CostParameters, MicrogridDesign, DisturbanceScenario, TimeSeriesInput
+from .models import CostParameters, MicrogridDesign, DisturbanceScenario, TimeSeriesInput, EMSPolicy
 from .simulation import simulate_microgrid_resilience
 
 
@@ -111,6 +111,7 @@ def evaluate_designs(
     days_in_dataset: float,
     critical_load_ratio: float = 0.2,
     random_seed: Optional[int] = None,
+    ems_policy: Optional[EMSPolicy] = None,
 ) -> List[Dict]:
     """
     Evaluate microgrid designs using resilience-oriented economic metrics only.
@@ -137,6 +138,7 @@ def evaluate_designs(
             time_input=time_input,
             critical_load_ratio=critical_load_ratio,
             random_seed=(None if random_seed is None else random_seed + idx),
+            ems_policy=ems_policy,
         )
 
         # --------------------------------------------------

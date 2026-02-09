@@ -19,10 +19,15 @@ from microgrid.models import (
     DisturbanceScenario,
     MicrogridDesign,
     CostParameters,
+    EMSPolicy,
 )
 from microgrid.simulation import simulate_microgrid_resilience
 from microgrid.cost import evaluate_designs, compare_baseline_and_strategies
-from microgrid.plotting import plot_all_figures, plot_monte_carlo_results
+from microgrid.plotting import (
+    plot_all_figures,
+    plot_monte_carlo_results,
+    plot_ems_timeseries,
+)
 from microgrid.weather_utils import build_time_input, build_hazard_from_weather
 from microgrid.monte_carlo import MonteCarloAnalyzer, MonteCarloConfig, UncertaintyDistribution
 
@@ -33,7 +38,7 @@ def compute_fuel_storage(fuel_rate_max, days_fuel, P_DG):
     return fuel_rate_max * 24 * days_fuel * n_dg
 
 
-def run_deterministic_simulation(df_weather, time_input, hazard, scenario, designs, cost_params):
+def run_deterministic_simulation(df_weather, time_input, hazard, scenario, designs, cost_params, ems_policy):
     """執行確定性微電網模擬（基準情景）"""
     print("=" * 80)
     print("【確定性模擬】")
@@ -45,6 +50,7 @@ def run_deterministic_simulation(df_weather, time_input, hazard, scenario, desig
         time_input=time_input,
         cost=cost_params,
         days_in_dataset=len(df_weather) / 24.0,
+        ems_policy=ems_policy,
     )
     
     rbcr_results = compare_baseline_and_strategies(
@@ -77,7 +83,7 @@ def run_deterministic_simulation(df_weather, time_input, hazard, scenario, desig
     return results, rbcr_results
 
 
-def run_monte_carlo_analysis(design, scenario, time_input, num_simulations=1000):
+def run_monte_carlo_analysis(design, scenario, time_input, ems_policy, num_simulations=1000):
     """執行 Monte Carlo 不確定分析"""
     print("\n" + "=" * 80)
     print("【Monte Carlo 不確定分析】")
@@ -199,6 +205,7 @@ def run_monte_carlo_analysis(design, scenario, time_input, num_simulations=1000)
         scenario=scenario,
         time_input=time_input,
         critical_load_ratio=0.2,
+        ems_policy=ems_policy,
     )
     
     # 生成報告
@@ -404,12 +411,28 @@ if __name__ == "__main__":
         C_fix_strategy=15000.0,
         fuel_price_per_gal=3.5,
     )
+
+    ems_policy = EMSPolicy(
+        pre_event_hours=24,
+        pre_event_target_soc=0.90,
+        pre_event_soc_max=0.90,
+        dg_start_soc=0.30,
+        dg_stop_soc=0.70,
+        load_tier_multipliers=[1.0, 0.6, 0.3],
+        load_tier_soc_thresholds=[0.5, 0.3],
+    )
     
     # ============================================================
     # 6. 執行確定性模擬
     # ============================================================
     results, rbcr_results = run_deterministic_simulation(
-        df_weather, time_input, hazard, scenario_hurricane, designs, cost_params
+        df_weather,
+        time_input,
+        hazard,
+        scenario_hurricane,
+        designs,
+        cost_params,
+        ems_policy,
     )
     
     # ============================================================
@@ -419,6 +442,7 @@ if __name__ == "__main__":
         design=design_baseline,
         scenario=scenario_hurricane,
         time_input=time_input,
+        ems_policy=ems_policy,
         num_simulations=1000,
     )
     
@@ -443,9 +467,19 @@ if __name__ == "__main__":
         time_input=time_input,
         critical_load_ratio=0.2,
         random_seed=42,
+        ems_policy=ems_policy,
     )
     
     plot_all_figures(
+        df=df_weather,
+        sim_result=sim_result,
+        scenario=scenario_hurricane,
+        disturbance_start=disturbance_start,
+        disturbance_end=disturbance_end,
+        output_dir="charts",
+    )
+
+    plot_ems_timeseries(
         df=df_weather,
         sim_result=sim_result,
         scenario=scenario_hurricane,

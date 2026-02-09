@@ -10,6 +10,7 @@ from .models import (
     DisturbanceScenario,
     TimeSeriesInput,
     SimulationResult,
+    EMSPolicy,
 )
 
 def simulate_microgrid_resilience(
@@ -18,6 +19,7 @@ def simulate_microgrid_resilience(
     time_input: TimeSeriesInput,
     critical_load_ratio: float = 0.2,
     random_seed: Optional[int] = None,
+    ems_policy: Optional[EMSPolicy] = None,
 ) -> SimulationResult:
     """
     新版微電網韌性模擬：
@@ -47,6 +49,8 @@ def simulate_microgrid_resilience(
         np.random.seed(random_seed)
 
     # ===== 基本時間序列 =====
+    if ems_policy is None:
+        ems_policy = EMSPolicy()
     D_full = time_input.demand
     cf_WT_ts = time_input.cf_WT
     cf_PV_ts = time_input.cf_PV
@@ -93,6 +97,10 @@ def simulate_microgrid_resilience(
     P_pv_all = [0.0] * T_len
     P_dg_all = [0.0] * T_len
 
+    ems_mode = ["normal"] * T_len
+    load_tier_ratio = [1.0] * T_len
+    avg_soc_frac = [0.0] * T_len
+
     fuel_used = 0.0
     fuel_remaining = design.fuel_storage
 
@@ -126,36 +134,34 @@ def simulate_microgrid_resilience(
     # ======================================================
     #                     逐 小 時 模 擬
     # ======================================================
+    dg_enabled = False
     for t in range(T_len):
         # --- 狀態判斷 ---
         in_storm = (td <= t <= tfr)
-        pre_storm = (t < td) and ((td - t) <= 24)
+        pre_storm = (t < td) and ((td - t) <= ems_policy.pre_event_hours)
         grid_available = (t < td) or (t > grid_back_time)
 
         Dt_full = D_full[t]
         hour = hours_ts[t] if hours_ts is not None else (t % 24)
 
-        # --- 決定負載 & SOC 範圍 ---
+        # --- 決定 SOC 範圍 ---
         if grid_available:
             # 主網可用：全負載
-            Dt = Dt_full
             soc_min_frac = design.B_min_soc_frac   # eg. 0.2
             soc_max_frac = design.B_max_soc_frac   # eg. 0.8
             if pre_storm:
                 # 災前 24h：SOC 上限允許到 90%
-                soc_max_frac = 0.90
+                soc_max_frac = ems_policy.pre_event_soc_max
         else:
             # 主網停電：只供應 critical load
-            Dt = Dt_full * critical_load_ratio
             soc_min_frac = 0.10
             soc_max_frac = 0.90
-
-        D_effective[t] = Dt
 
         # --- 主網恢復後強制 DG 不再運轉 ---
         if t > grid_back_time:
             for i in range(n_DG):
                 U_DG[i] = 0
+            dg_enabled = False
 
         # --- 設備故障（只在停電期間有 hazard-based 故障）---
         if not grid_available:
@@ -205,6 +211,37 @@ def simulate_microgrid_resilience(
             soc_max = soc_max_frac * B_max_i
             B[i][t] = min(max(B[i][t], soc_min), soc_max)
 
+        # --- 平均 SOC（用於 EMS 決策） ---
+        if n_BAT > 0:
+            avg_soc_frac[t] = (
+                sum(B[i][t] / max(design.B_max[i], 1e-9) for i in range(n_BAT))
+                / n_BAT
+            )
+        else:
+            avg_soc_frac[t] = 0.0
+
+        # --- 決定負載（含分級卸載） ---
+        if grid_available:
+            Dt = Dt_full
+            load_tier_ratio[t] = 1.0
+        else:
+            tier_thresholds = ems_policy.load_tier_soc_thresholds
+            tier_levels = ems_policy.load_tier_multipliers or [1.0]
+            tier_ratio = tier_levels[0]
+            if len(tier_thresholds) >= 2 and len(tier_levels) >= 3:
+                if avg_soc_frac[t] < tier_thresholds[1]:
+                    tier_ratio = tier_levels[2]
+                elif avg_soc_frac[t] < tier_thresholds[0]:
+                    tier_ratio = tier_levels[1]
+            elif len(tier_thresholds) >= 1 and len(tier_levels) >= 2:
+                if avg_soc_frac[t] < tier_thresholds[0]:
+                    tier_ratio = tier_levels[1]
+
+            load_tier_ratio[t] = tier_ratio
+            Dt = Dt_full * critical_load_ratio * tier_ratio
+
+        D_effective[t] = Dt
+
         # --- WT / PV 出力 ---
         P_wt_t = sum(
             design.P_WT[i] * cf_WT_ts[t] * design.A_WT * derate_WT[t]
@@ -223,12 +260,23 @@ def simulate_microgrid_resilience(
         P_wt_all[t] = P_wt_t
         P_pv_all[t] = P_pv_t
 
+        # --- DG 啟停邏輯（只在停電期間） ---
+        if not grid_available:
+            if dg_enabled:
+                if avg_soc_frac[t] >= ems_policy.dg_stop_soc:
+                    dg_enabled = False
+            else:
+                if avg_soc_frac[t] <= ems_policy.dg_start_soc:
+                    dg_enabled = True
+        else:
+            dg_enabled = False
+
         # 預設 DG 為 0（以防早期 return/continue）
         P_dg_t = 0.0
 
-        # === 災前 24 小時：強制電池維持 90% SOC，略過 EMS / DG / Island 邏輯 ===
+        # === 災前 24 小時：強制電池維持 target SOC，略過 EMS / DG / Island 邏輯 ===
         if pre_storm and grid_available:
-            target_soc = 0.90
+            target_soc = ems_policy.pre_event_target_soc
             for i in range(n_BAT):
                 B_max_i = design.B_max[i]
                 target_energy = target_soc * B_max_i
@@ -249,10 +297,11 @@ def simulate_microgrid_resilience(
 
             P_dg_all[t] = 0.0
             Pt[t] = P_wt_t + P_pv_t + 0.0 + sum(design.P_BAT)
+            ems_mode[t] = "pre_event_charge"
             continue  # 跳過後續邏輯，進入下一個小時
 
         # --- Diesel dispatch（只在停電期間使用）---
-        if (not grid_available) and Dt > 0 and fuel_remaining > 0:
+        if (not grid_available) and Dt > 0 and fuel_remaining > 0 and dg_enabled:
             residual = Dt - (P_wt_t + P_pv_t)
             for i in range(n_DG):
                 if U_DG[i] == 0:
@@ -372,6 +421,16 @@ def simulate_microgrid_resilience(
                 Tt[t] = 0.0
 
             service_level[t] = min(1.0, Gt[t] / Dt) if Dt > 0 else 1.0
+            tier_label = "island_tier_1"
+            if len(ems_policy.load_tier_multipliers) >= 3:
+                if load_tier_ratio[t] <= ems_policy.load_tier_multipliers[2]:
+                    tier_label = "island_tier_3"
+                elif load_tier_ratio[t] <= ems_policy.load_tier_multipliers[1]:
+                    tier_label = "island_tier_2"
+            elif len(ems_policy.load_tier_multipliers) >= 2:
+                if load_tier_ratio[t] <= ems_policy.load_tier_multipliers[1]:
+                    tier_label = "island_tier_2"
+            ems_mode[t] = tier_label
 
         # ===== B. 主網可用模式（Grid-connected Mode） =====
         else:
@@ -435,6 +494,7 @@ def simulate_microgrid_resilience(
                 Tt[t] = 0.0
                 curtailment[t] = max(0.0, surplus)
                 service_level[t] = 1.0
+                ems_mode[t] = "grid_ems_charge"
 
             # -------- CASE 2：放電時段（每天放到 20%） --------
             # ⚠ 災害前 24 小時不執行放電（已在 pre_storm 分支中被 continue 掉）
@@ -472,6 +532,7 @@ def simulate_microgrid_resilience(
                 Tt[t] = 0.0
                 curtailment[t] = 0.0
                 service_level[t] = 1.0
+                ems_mode[t] = "grid_ems_discharge"
 
             # -------- CASE 3：一般 Grid-connected 狀態 --------
             else:
@@ -546,6 +607,7 @@ def simulate_microgrid_resilience(
                 Gt[t] = Dt
                 Tt[t] = 0.0
                 service_level[t] = 1.0
+                ems_mode[t] = "grid_ems_normal"
 
         # ===== 統一計算 Pt（每一小時結尾） =====
         Pt[t] = P_wt_t + P_pv_t + P_dg_t + sum(design.P_BAT)
@@ -659,5 +721,8 @@ def simulate_microgrid_resilience(
         EENS_ratio=EENS_ratio,
         NPR=NPR,
         CLSR=CLSR,
-        EID=EID
+        EID=EID,
+        ems_mode=ems_mode,
+        load_tier_ratio=load_tier_ratio,
+        avg_soc_frac=avg_soc_frac,
     )

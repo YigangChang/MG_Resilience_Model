@@ -1,5 +1,5 @@
 # microgrid/models.py
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import List, Optional
 
 
@@ -102,6 +102,27 @@ class SimulationResult:
     critical_load_survival_time: int
     fuel_sustainability_h: float
     EENS_ratio: float #EENS / total demand ratio
+
+    # === EMS tracing ===
+    ems_mode: List[str]
+    load_tier_ratio: List[float]
+    avg_soc_frac: List[float]
+
+
+@dataclass
+class EMSPolicy:
+    """EMS strategy parameters."""
+    pre_event_hours: int = 24
+    pre_event_target_soc: float = 0.90
+    pre_event_soc_max: float = 0.90
+    dg_start_soc: float = 0.30
+    dg_stop_soc: float = 0.70
+    load_tier_multipliers: List[float] = field(
+        default_factory=lambda: [1.0, 0.6, 0.3]
+    )
+    load_tier_soc_thresholds: List[float] = field(
+        default_factory=lambda: [0.5, 0.3]
+    )
 
 @dataclass
 class CostParameters:

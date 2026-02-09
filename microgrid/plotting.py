@@ -161,6 +161,72 @@ def plot_all_figures(
     print("完成圖表繪製!")
 
 
+def plot_ems_timeseries(
+    df: pd.DataFrame,
+    sim_result: SimulationResult,
+    scenario: DisturbanceScenario,
+    disturbance_start: int,
+    disturbance_end: int,
+    output_dir: str = "charts",
+):
+    """
+    Plot EMS-related time series (avg SOC, load tier ratio, EMS mode).
+    """
+    os.makedirs(output_dir, exist_ok=True)
+
+    T_len = len(sim_result.demand)
+    idx_start = max(0, disturbance_start - 24)
+    idx_end = min(T_len - 1, disturbance_start + scenario.evaluation_horizon_hours)
+
+    timestamp_window = df["timestamp"].iloc[idx_start:idx_end + 1]
+    soc_window = np.array(sim_result.avg_soc_frac)[idx_start:idx_end + 1]
+    tier_window = np.array(sim_result.load_tier_ratio)[idx_start:idx_end + 1]
+    mode_window = np.array(sim_result.ems_mode)[idx_start:idx_end + 1]
+
+    mode_map = {
+        "pre_event_charge": 0,
+        "island_tier_1": 1,
+        "island_tier_2": 2,
+        "island_tier_3": 3,
+        "grid_ems_charge": 4,
+        "grid_ems_discharge": 5,
+        "grid_ems_normal": 6,
+        "normal": 7,
+    }
+    mode_values = np.array([mode_map.get(m, 8) for m in mode_window])
+
+    fig, axes = plt.subplots(3, 1, figsize=(12, 7), sharex=True)
+
+    axes[0].plot(timestamp_window, soc_window, label="Avg SOC")
+    axes[0].axvline(df["timestamp"].iloc[disturbance_start], linestyle="--")
+    axes[0].axvline(df["timestamp"].iloc[disturbance_end], linestyle="--")
+    axes[0].set_ylabel("SOC fraction")
+    axes[0].set_title("EMS: Average SOC")
+    axes[0].legend()
+
+    axes[1].plot(timestamp_window, tier_window, color="tab:orange", label="Load tier ratio")
+    axes[1].axvline(df["timestamp"].iloc[disturbance_start], linestyle="--")
+    axes[1].axvline(df["timestamp"].iloc[disturbance_end], linestyle="--")
+    axes[1].set_ylabel("Tier ratio")
+    axes[1].set_title("EMS: Load Tier Ratio")
+    axes[1].legend()
+
+    axes[2].step(timestamp_window, mode_values, where="post", color="tab:green")
+    axes[2].axvline(df["timestamp"].iloc[disturbance_start], linestyle="--")
+    axes[2].axvline(df["timestamp"].iloc[disturbance_end], linestyle="--")
+    axes[2].set_ylabel("Mode index")
+    axes[2].set_title("EMS: Mode Timeline")
+    axes[2].set_yticks(sorted(set(mode_values)))
+    mode_labels = {}
+    for k, v in mode_map.items():
+        mode_labels[v] = k
+    axes[2].set_yticklabels([mode_labels.get(v, "other") for v in axes[2].get_yticks()])
+
+    plt.tight_layout()
+    plt.savefig(os.path.join(output_dir, "EMS_TimeSeries.png"), dpi=200)
+    plt.show()
+
+
 def plot_monte_carlo_results(
     mc_result,
     output_dir: str = "charts/monte_carlo",

@@ -19,6 +19,7 @@ from .models import (
     MicrogridDesign,
     DisturbanceScenario,
     TimeSeriesInput,
+    EMSPolicy,
 )
 from .simulation import simulate_microgrid_resilience
 
@@ -169,7 +170,7 @@ class MonteCarloConfig:
     )
     
     # MC 參數
-    num_simulations: int = 100  # Monte Carlo 試驗次數
+    num_simulations: int = 1000  # Monte Carlo 試驗次數
     random_seed: Optional[int] = None
 
 
@@ -255,6 +256,7 @@ class MonteCarloAnalyzer:
         scenario: DisturbanceScenario,
         time_input: TimeSeriesInput,
         critical_load_ratio: float = 0.2,
+        ems_policy: Optional[EMSPolicy] = None,
     ) -> MonteCarloResult:
         """
         執行 Monte Carlo 不確定分析
@@ -305,7 +307,8 @@ class MonteCarloAnalyzer:
                 scenario=sampled_scenario,
                 time_input=time_input,
                 critical_load_ratio=critical_load_ratio,
-                random_seed=None  # 使用全局 RNG 狀態
+                random_seed=None,  # 使用全局 RNG 狀態
+                ems_policy=ems_policy,
             )
             
             # === 收集結果 ===
