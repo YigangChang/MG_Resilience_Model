@@ -29,9 +29,9 @@ def simulate_microgrid_resilience(
         * 此期間不執行每日放電 / 一般 EMS 控制
     - 災害 + 停電期間（主網不可用）：
         * 只供應 critical load = critical_load_ratio * demand
-        * 供電順序：WT/PV -> DG -> BESS -> Unserved
-        (*供電順序：WT/PV -> BESS -> DG -> Unserved??) 可嘗試?
+        * 供電順序：WT/PV -> BESS -> DG -> Unserved
         * 電池 SOC 範圍：10% ~ 90%
+        * DG 使用 dg_start_soc / dg_stop_soc 遲滯控制
     - 主網可用期間（含非災期與復電後）：
         * 負載 = 全部 demand
         * 平常 SOC 範圍：B_min_soc_frac ~ B_max_soc_frac（例如 20%~80%）
@@ -41,6 +41,8 @@ def simulate_microgrid_resilience(
             - 其它時間：維持「RE 優先，其次 BESS，最後 Grid」的邏輯
         * 主網可用時，使用者無缺電：service_level = 1
     - 主網恢復後（t > grid_back_time）：柴油機強制不再啟動（U_DG = 0）
+
+    SUMMARY: Simulates island/grid dispatch with hazard-driven failures, SOC-bounded storage, and DG hysteresis control to produce resilience metrics.
     """
 
     # ===== 隨機種子 =====
@@ -260,7 +262,7 @@ def simulate_microgrid_resilience(
         P_wt_all[t] = P_wt_t
         P_pv_all[t] = P_pv_t
 
-        # --- DG 啟停邏輯（只在停電期間） ---
+        # --- DG 啟停邏輯（停電期間，使用 SOC 遲滯） ---
         if not grid_available:
             if dg_enabled:
                 if avg_soc_frac[t] >= ems_policy.dg_stop_soc:
@@ -300,43 +302,9 @@ def simulate_microgrid_resilience(
             ems_mode[t] = "pre_event_charge"
             continue  # 跳過後續邏輯，進入下一個小時
 
-        # --- Diesel dispatch（只在停電期間使用）---
-        if (not grid_available) and Dt > 0 and fuel_remaining > 0 and dg_enabled:
-            residual = Dt - (P_wt_t + P_pv_t)
-            for i in range(n_DG):
-                if U_DG[i] == 0:
-                    continue
-
-                P_rated = design.P_DG[i]
-                unit_min = P_rated * design.DG_min_loading
-                unit_max = P_rated * design.DG_max_loading
-
-                if residual <= 0:
-                    break
-
-                desired = min(residual, unit_max)
-                if desired < unit_min:
-                    if P_dg_t == 0.0:
-                        desired = unit_min
-                    else:
-                        continue
-
-                fuel_need = design.fuel_rate_max * (desired / P_rated)
-                if fuel_remaining < fuel_need:
-                    ratio = fuel_remaining / fuel_need
-                    desired *= ratio
-                    fuel_need = fuel_remaining
-
-                P_dg_t += desired
-                residual -= desired
-                fuel_used += fuel_need
-                fuel_remaining -= fuel_need
-
-        P_dg_all[t] = P_dg_t
-
         # ===== A. 主網停電模式（Island Mode） =====
         if not grid_available:
-            P_gen_no_batt = P_wt_t + P_pv_t + P_dg_t
+            P_gen_no_batt = P_wt_t + P_pv_t
             diff = Dt - P_gen_no_batt  # >0 代表缺電，<0 代表多餘
 
             # reset 當小時電池功率
@@ -378,7 +346,7 @@ def simulate_microgrid_resilience(
                 Tt[t] = 0.0
 
             elif diff > 0:
-                # --- 缺電：放電 ---
+                # --- 缺電：先放電，再由 DG 補 ---
                 deficit = diff
                 supply_b = 0.0
 
@@ -412,8 +380,46 @@ def simulate_microgrid_resilience(
                         B_prev - discharge / max(design.eta_d, 1e-9),
                     )
 
-                Gt[t] = P_gen_no_batt + supply_b
-                Tt[t] = max(0.0, Dt - Gt[t])
+                # --- DG 補缺（在電池之後） ---
+                if deficit > 0 and fuel_remaining > 0 and dg_enabled:
+                    residual = deficit
+                    for i in range(n_DG):
+                        if U_DG[i] == 0:
+                            continue
+
+                        P_rated = design.P_DG[i]
+                        unit_min = P_rated * design.DG_min_loading
+                        unit_max = P_rated * design.DG_max_loading
+
+                        if residual <= 0:
+                            break
+
+                        desired = min(residual, unit_max)
+                        if desired < unit_min:
+                            if P_dg_t == 0.0:
+                                desired = unit_min
+                            else:
+                                continue
+
+                        fuel_need = design.fuel_rate_max * (desired / P_rated)
+                        if fuel_remaining < fuel_need:
+                            ratio = fuel_remaining / fuel_need
+                            desired *= ratio
+                            fuel_need = fuel_remaining
+
+                        P_dg_t += desired
+                        residual -= desired
+                        fuel_used += fuel_need
+                        fuel_remaining -= fuel_need
+
+                P_gen_total = P_gen_no_batt + supply_b + P_dg_t
+                if P_gen_total >= Dt:
+                    Gt[t] = Dt
+                    Tt[t] = 0.0
+                    curtailment[t] = max(0.0, P_gen_total - Dt)
+                else:
+                    Gt[t] = P_gen_total
+                    Tt[t] = Dt - P_gen_total
 
             else:
                 # 剛好平衡
@@ -608,6 +614,9 @@ def simulate_microgrid_resilience(
                 Tt[t] = 0.0
                 service_level[t] = 1.0
                 ems_mode[t] = "grid_ems_normal"
+
+        # ===== 記錄 DG 出力（所有模式） =====
+        P_dg_all[t] = P_dg_t
 
         # ===== 統一計算 Pt（每一小時結尾） =====
         Pt[t] = P_wt_t + P_pv_t + P_dg_t + sum(design.P_BAT)

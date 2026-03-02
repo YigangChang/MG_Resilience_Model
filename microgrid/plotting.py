@@ -1,5 +1,6 @@
 # microgrid/plotting.py
 import os
+import math
 from typing import Tuple
 
 import numpy as np
@@ -428,3 +429,73 @@ def plot_monte_carlo_results(
     plt.close()
     
     print(f"Monte Carlo 分析圖表已保存至: {output_dir}")
+
+
+def create_design_side_by_side_comparisons(
+    base_dir: str = "charts",
+    output_dir: str = "charts/design_comparison",
+    file_names=None,
+):
+    if file_names is None:
+        file_names = [
+            "Resilience_Curve_Service_Level.png",
+            "PV_Availability_Timeline.png",
+            "Hourly_Generation_and_Battery.png",
+            "Hourly_Demand_Served_Unserved.png",
+            "Hourly_Battery_SOC_Average.png",
+            "DER_Availability_Timeline_WT_DG_BAT.png",
+            "EMS_TimeSeries.png",
+        ]
+
+    design_dirs = []
+    for name in sorted(os.listdir(base_dir)):
+        path = os.path.join(base_dir, name)
+        if os.path.isdir(path) and name.startswith("design_"):
+            design_dirs.append(path)
+
+    if len(design_dirs) < 2:
+        print("Design comparison skipped: need at least 2 design folders.")
+        return
+
+    os.makedirs(output_dir, exist_ok=True)
+
+    for file_name in file_names:
+        image_paths = []
+        image_titles = []
+        for design_path in design_dirs:
+            image_path = os.path.join(design_path, file_name)
+            if os.path.exists(image_path):
+                image_paths.append(image_path)
+                image_titles.append(os.path.basename(design_path))
+
+        if len(image_paths) < 2:
+            continue
+
+        n = len(image_paths)
+        n_cols = min(3, n)
+        n_rows = math.ceil(n / n_cols)
+
+        fig, axes = plt.subplots(n_rows, n_cols, figsize=(6 * n_cols, 4 * n_rows))
+        axes_array = np.atleast_1d(axes).reshape(n_rows, n_cols)
+
+        for idx, (img_path, title) in enumerate(zip(image_paths, image_titles)):
+            row = idx // n_cols
+            col = idx % n_cols
+            ax = axes_array[row, col]
+            image = plt.imread(img_path)
+            ax.imshow(image)
+            ax.set_title(title)
+            ax.axis("off")
+
+        for idx in range(len(image_paths), n_rows * n_cols):
+            row = idx // n_cols
+            col = idx % n_cols
+            axes_array[row, col].axis("off")
+
+        fig.suptitle(file_name.replace(".png", ""))
+        plt.tight_layout()
+        comparison_name = f"comparison_{file_name}"
+        plt.savefig(os.path.join(output_dir, comparison_name), dpi=200)
+        plt.close(fig)
+
+    print(f"Design side-by-side comparison figures saved to: {output_dir}")
